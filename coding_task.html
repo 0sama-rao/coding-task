@@ -6,6 +6,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0, minimum-scale=1.0">
     <title>Rich Text Editor</title>
     <style>
+        .page-break {
+            border-top: 3px dashed #aaa;
+            margin: 16px 0;
+            pointer-events: none;
+        }
+
         .editor-container {
             max-width: 800px;
             margin: 20px auto;
@@ -137,7 +143,9 @@
                     <li>item</li>
                     <li>item</li>
                     <li>item</li>
-                </ul>Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut
+                </ul>
+            </div>
+            <div>Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut
                 labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et
                 ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum
                 dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore
@@ -258,11 +266,133 @@
             }
         }, { once: true });
 
+
+        let splitCounter = 0;
+        // Checks if an element is a plain text paragraph
+        function isTextParagraph(paragraph) {
+            return paragraph.tagName === 'DIV' && paragraph.querySelector('table, ul, ol, img') === null;
+        }
+
+        // spliting paragraph at the specified height into two divs and return them as [topHalf, bottomHalf]
+        function splitParagraphAtHeight(paragraph, remainingHeight) {
+            const words = paragraph.textContent.trim().split(' ');
+
+            // Creating a hidden measuring div with the same width as the real paragraph
+            const measureDiv = document.createElement('div');
+            measureDiv.style.position = 'absolute';
+            measureDiv.style.visibility = 'hidden';
+            measureDiv.style.width = paragraph.offsetWidth + 'px';
+            document.body.appendChild(measureDiv);
+
+            // using binary search find max number of words that fit in remainingHeight
+            let minWords = 0, maxWords = words.length;
+            while (minWords < maxWords) {
+                const mid = Math.ceil((minWords + maxWords) / 2);
+                measureDiv.textContent = words.slice(0, mid).join(' ');
+                if (measureDiv.offsetHeight <= remainingHeight) {
+                    minWords = mid;
+                } else {
+                    maxWords = mid - 1;
+                }
+            }
+
+            // done measuring, remove it from DOM
+            document.body.removeChild(measureDiv); 
+
+            // using unique splitId to link top and bottom halves for later rejoining
+            const splitId = 'split-' + splitCounter++;
+
+            const topHalf = document.createElement('div');
+
+            // words that fit on current page
+            topHalf.textContent = words.slice(0, minWords).join(' ');
+            topHalf.dataset.splitId = splitId;
+            topHalf.dataset.splitPart = 'top';
+
+            const bottomHalf = document.createElement('div');
+
+             // remaining words go to next page
+            bottomHalf.textContent = words.slice(minWords).join(' ');
+            bottomHalf.dataset.splitId = splitId;
+            bottomHalf.dataset.splitPart = 'bottom';
+
+            return [topHalf, bottomHalf];
+        }
+
+        // re-merging previously split paragraphs before recalculating page breaks to avoid compounding splits
+        function rejoinSplitParagraphs(editor) {
+            editor.querySelectorAll('[data-split-part="top"]').forEach(topHalf => {
+                const splitId = topHalf.dataset.splitId;
+                const bottomHalf = editor.querySelector(`[data-split-part="bottom"][data-split-id="${splitId}"]`);
+                if (bottomHalf) {
+                    const mergedParagraph = document.createElement('div');
+                    mergedParagraph.textContent = topHalf.textContent.trim() + ' ' + bottomHalf.textContent.trim();
+                    // insert merged before the top half
+                    editor.insertBefore(mergedParagraph, topHalf);
+                    topHalf.remove();
+                    bottomHalf.remove();
+                }
+            });
+        }
+
         function setPageBreak() {
             const pageHeight = parseInt(document.getElementById('pageHeight').value);
             const editor = document.getElementById('editor');
-            // TODO: implement page break
+
+            rejoinSplitParagraphs(editor);
+            editor.querySelectorAll('.page-break').forEach(br => br.remove());
+
+            if (!pageHeight || pageHeight <= 0) return;
+
+            const queue = Array.from(editor.children);
+            let i = 0;
+            let accumulated = 0;
+
+            while (i < queue.length) {
+                const child = queue[i];
+                const elementHeight = child.offsetHeight;
+                const remaining = pageHeight - accumulated;
+
+                if (isTextParagraph(child) && elementHeight > remaining) {
+                    const [topHalf, bottomHalf] = splitParagraphAtHeight(child, remaining);
+                    editor.insertBefore(topHalf, child);
+                    const pageBreak = document.createElement('div');
+                    pageBreak.className = 'page-break';
+                    editor.insertBefore(pageBreak, child);
+                    editor.insertBefore(bottomHalf, child);
+                    child.remove();
+                    queue[i] = bottomHalf;
+                    accumulated = 0;
+                } else if (accumulated + elementHeight > pageHeight && accumulated > 0) {
+                    const pageBreak = document.createElement('div');
+                    pageBreak.className = 'page-break';
+                    editor.insertBefore(pageBreak, child);
+                    accumulated = 0;
+                    accumulated += elementHeight;
+                    i++;
+                } else {
+                    accumulated += elementHeight;
+                    i++;
+                }
+            }
         }
+
+        /*
+         * thoughts on handling different content types:
+         * tables-> can split at <tr> boundaries → topTable + page-break + bottomTable
+         * lists-> can split at <li> boundaries → topList + page-break + bottomList
+         * images:  its atomic block that either fits or moves to next page, no splitting
+         */
+
+        // Using debounce for real time page break update
+        let debounceTimer;
+        editor.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                if (document.getElementById('pageHeight').value) setPageBreak();
+            }, 300);
+        });
+
     </script>
 <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"c326e5c2c75441d993469e85607d3220","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
